@@ -264,6 +264,35 @@ class SemsClient:
     def read_grid_draw_watts(self, import_status: int = 1) -> float:
         return self.grid_draw_watts(self.monitor_detail(), import_status)
 
+    @staticmethod
+    def has_battery(detail: dict[str, Any]) -> bool:
+        """Is real storage attached, as opposed to an empty hybrid slot?
+
+        battery_count reads 1 on a hybrid inverter with nothing plugged in,
+        so it cannot be trusted on its own. Physical evidence -- voltage,
+        state of health, or actual power flow -- is what distinguishes a
+        fitted battery from an empty bay.
+        """
+        for inverter in detail.get("inverter") or []:
+            if not isinstance(inverter, dict):
+                continue
+            full = inverter.get("invert_full")
+            if not isinstance(full, dict):
+                continue
+            for key in ("vbattery1", "total_pbattery", "soh"):
+                value = full.get(key)
+                if isinstance(value, (int, float)) and value != 0:
+                    return True
+            for pack in full.get("more_batterys") or []:
+                if not isinstance(pack, dict):
+                    continue
+                if any(
+                    isinstance(pack.get(k), (int, float)) and pack[k] != 0
+                    for k in ("vbattery", "soh", "pbattery")
+                ):
+                    return True
+        return False
+
     def flow_summary(self, detail: dict[str, Any]) -> dict[str, Any]:
         """The other powerflow figures, for display alongside grid draw."""
         flow = detail.get("powerflow")
@@ -275,9 +304,14 @@ class SemsClient:
             value = parse_power(flow.get(source_key))
             if value is not None:
                 summary[label] = value
-        soc = flow.get("socText") or flow.get("soc")
-        if soc not in (None, "", 0, "0%"):
-            summary["soc"] = soc
+
+        # Report SOC only when a battery is actually fitted -- but then report
+        # it even at 0%, because a flat battery is the reading that matters
+        # most. Suppressing "0%" would hide exactly that.
+        if self.has_battery(detail):
+            soc = flow.get("socText") or flow.get("soc")
+            if soc not in (None, ""):
+                summary["soc"] = soc
         return summary
 
     def power_curve(self, date: str) -> list[tuple[str, float]]:

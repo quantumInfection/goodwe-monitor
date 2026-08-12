@@ -169,6 +169,85 @@ away rather than waiting out a timer.
 `./service.sh restart` after editing them. Snoozing is a state file, so it
 applies instantly.
 
+## If you add a battery
+
+Short answer: yes, it stays useful — but **the quiet-hours advice above
+inverts, and leaving it as-is would mute the most valuable alert you have.**
+
+Without storage, overnight grid draw is unavoidable. There is no sun and no
+reserve, so an alert tells you nothing you can act on — hence `ACTIVE_HOURS`
+and `MIN_PV_WATTS`.
+
+With storage, overnight grid draw means **the battery is not covering the
+load**. It is flat, faulted, throttled by a BMS alarm, or reserving charge
+because of a misconfigured backup floor. That is the single most diagnostic
+signal the system produces, and a daylight-only window hides it completely.
+
+So when you commission a battery:
+
+```ini
+ACTIVE_HOURS=          # blank — night draw is now the interesting case
+MIN_PV_WATTS=0         # low PV no longer means "nothing to act on"
+```
+
+The threshold alone becomes the useful signal, around the clock.
+
+### Re-verify the sign first
+
+The energy-balance fallback computes `grid = load − pv − battery`, which
+assumes **positive battery = discharging** (supplying the house). That matches
+the library's own local formula, `house_consumption = pv + pbattery1 −
+active_power`.
+
+It has never been exercised against real storage. Every sample this was built
+on had `battery 0`, so the term always vanished. With a battery it becomes
+load-bearing, and if SEMS reports charging as positive instead, grid draw will
+be wrong by twice the battery power.
+
+Check it on the first sunny afternoon while the battery is charging:
+
+```bash
+./venv/bin/python sems.py --probe
+```
+
+The reported grid figure should agree with the SEMS app. It is only the
+fallback path that is at risk — `pmeter` is preferred and is independent of
+the battery term.
+
+Also treat `betteryStatus` with the same suspicion as `gridStatus`, which
+[turns out not to track direction](#sems-gridstatus-is-not-a-direction-flag).
+Do not assume the charge/discharge flag is trustworthy without checking it
+against the energy balance.
+
+### Battery presence is not `battery_count`
+
+A hybrid inverter with an empty bay still reports `battery_count: 1` and a
+populated `more_batterys` entry, with `vbattery`, `soh`, and power all zero.
+Detection therefore looks for physical evidence — voltage, state of health, or
+actual power flow — rather than trusting the count.
+
+This is why state of charge appears only when a battery is really fitted, and
+why it is shown **even at 0%**: on a system with storage, a flat battery is
+precisely the reading you need to see.
+
+### Alerts worth adding
+
+A plain grid-draw threshold no longer captures everything once storage exists.
+The data for these is already collected (`stats["battery"]` and
+`stats["soc"]`); the rules are not implemented:
+
+| Condition | Why it matters |
+| --- | --- |
+| SOC below a reserve floor | You are about to lose backup capability |
+| Grid import while SOC is healthy | Battery should be covering this — fault or bad config |
+| Battery charging *from the grid* | Costs money unless you are on a cheap tariff |
+| Exporting while the battery is not full | Charge priority is misconfigured |
+
+One caveat in the other direction: if you deliberately charge from the grid on
+a cheap night tariff, that is a large, intentional import which the plain
+threshold will flag. Either schedule `ACTIVE_HOURS` around the tariff window,
+or `./service.sh snooze` for its duration.
+
 ## Configuration
 
 All settings live in `.env`; see [`.env.example`](.env.example) for the full
@@ -231,8 +310,8 @@ Direction is therefore taken from, in order:
 3. `grid` + `gridStatus`, last resort only, with a warning.
 
 The battery term in step 2 is unverified — it was developed on a system without
-storage, so every sample had `battery 0`. Re-check with `--probe` if you have a
-battery.
+storage, so every sample had `battery 0`. See
+[If you add a battery](#if-you-add-a-battery) before relying on it.
 
 ### SEMS endpoint quirks
 
