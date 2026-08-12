@@ -280,6 +280,48 @@ class SemsClient:
             summary["soc"] = soc
         return summary
 
+    def power_curve(self, date: str) -> list[tuple[str, float]]:
+        """PV output through one day as [(HH:MM, watts)].
+
+        `date` is YYYY-MM-DD. Today's curve is truncated at the current time,
+        so use a past date to see a full sunrise-to-sunset span.
+        """
+        data = self.post(
+            "v2/Charts/GetPlantPowerChart",
+            {"id": self.resolve_station_id(), "date": date, "full_script": False},
+        )
+        lines = (data or {}).get("lines") or []
+        pv = next((l for l in lines if l.get("key") == "PCurve_Power_PV"), None)
+        if not pv:
+            return []
+        return [
+            (point["x"], float(point["y"]))
+            for point in pv.get("xy") or []
+            if isinstance(point.get("y"), (int, float))
+        ]
+
+    def production_window(
+        self, date: str, floor_watts: float = 100.0
+    ) -> dict[str, Any]:
+        """Summarise when the panels were actually producing on `date`."""
+        curve = self.power_curve(date)
+        producing = [(t, w) for t, w in curve if w > 0]
+        above = [(t, w) for t, w in curve if w >= floor_watts]
+        if not producing:
+            return {"date": date, "any_output": False}
+        peak_time, peak_watts = max(producing, key=lambda tw: tw[1])
+        return {
+            "date": date,
+            "any_output": True,
+            "first": producing[0][0],
+            "last": producing[-1][0],
+            "first_above": above[0][0] if above else None,
+            "last_above": above[-1][0] if above else None,
+            "peak_time": peak_time,
+            "peak_watts": peak_watts,
+            "floor_watts": floor_watts,
+        }
+
     def read(self, import_status: int = 1) -> tuple[float, dict[str, Any]]:
         """Grid draw in watts plus the surrounding powerflow figures."""
         detail = self.monitor_detail()
@@ -287,6 +329,56 @@ class SemsClient:
             self.grid_draw_watts(detail, import_status),
             self.flow_summary(detail),
         )
+
+
+def _show_curve(client: SemsClient, args: Any) -> int:
+    """Print the production window per day, plus a suggested ACTIVE_HOURS."""
+    import datetime
+
+    try:
+        days = int(args.curve)
+    except (TypeError, ValueError):
+        days = 0
+
+    if days > 0:
+        # Complete days only -- today's curve stops at the current time and
+        # would make sunset look far earlier than it is.
+        dates = [
+            (datetime.date.today() - datetime.timedelta(days=n)).isoformat()
+            for n in range(1, days + 1)
+        ]
+    else:
+        dates = [datetime.date.today().isoformat()]
+        print("Today's curve is cut off at the current time. "
+              "Use --curve 3 for complete days.\n")
+
+    print(f"{'date':12} {'first':>7} {'>=' + str(int(args.floor)) + 'W':>7} "
+          f"{'peak':>18} {'last>=':>7} {'last':>7}")
+    windows = []
+    for date in dates:
+        try:
+            info = client.production_window(date, args.floor)
+        except (SemsError, requests.RequestException) as err:
+            print(f"{date:12}  unavailable ({err})")
+            continue
+        if not info["any_output"]:
+            print(f"{date:12}  no output recorded")
+            continue
+        peak = f"{info['peak_time']} {info['peak_watts']:,.0f}W"
+        print(f"{date:12} {info['first']:>7} {str(info['first_above']):>7} "
+              f"{peak:>18} {str(info['last_above']):>7} {info['last']:>7}")
+        windows.append(info)
+
+    if windows and days > 0:
+        earliest = min(w["first"] for w in windows)
+        latest = max(w["last"] for w in windows)
+        print(f"\nAcross {len(windows)} day(s), the panels produced between "
+              f"{earliest} and {latest}.")
+        print(f"Suggested:  ACTIVE_HOURS={earliest}-{latest}")
+        print("\nThis is a snapshot of the current season -- daylight shifts by "
+              "hours over the year.\nRe-run this occasionally, or set "
+              "MIN_PV_WATTS to mute on actual output instead of the clock.")
+    return 0
 
 
 def _probe() -> int:
@@ -299,7 +391,16 @@ def _probe() -> int:
     parser = argparse.ArgumentParser(description="Check SEMS credentials and data")
     parser.add_argument("--probe", action="store_true")
     parser.add_argument("--dump", action="store_true", help="print the full JSON")
-    parser.parse_args()
+    parser.add_argument(
+        "--curve", nargs="?", const="0", metavar="DAYS",
+        help="show when the panels actually produce, to set ACTIVE_HOURS. "
+             "DAYS = how many complete past days to include (default today).",
+    )
+    parser.add_argument(
+        "--floor", type=float, default=100.0,
+        help="watts counted as 'really producing' (default 100)",
+    )
+    args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
     try:
@@ -316,6 +417,9 @@ def _probe() -> int:
     except (SemsError, requests.RequestException) as err:
         print(f"\nFAILED: {err}")
         return 1
+
+    if args.curve is not None:
+        return _show_curve(client, args)
 
     flow = detail.get("powerflow") or {}
     print("\n--- powerflow ---")

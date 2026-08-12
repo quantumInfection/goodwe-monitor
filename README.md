@@ -130,9 +130,20 @@ suppress the alert:
 **Scheduled window** — in `.env`:
 
 ```ini
-ACTIVE_HOURS=06:00-20:00   # blank = always; may wrap midnight, e.g. 22:00-06:00
+ACTIVE_HOURS=05:00-19:15   # blank = always; may wrap midnight, e.g. 22:00-06:00
 ACTIVE_DAYS=mon-fri        # blank = every day; also mon,wed,sat
 ```
+
+Set these from your **own** production curve, not a guess. Check when your
+panels actually start and stop:
+
+```bash
+./venv/bin/python sems.py --curve          # today
+./venv/bin/python sems.py --curve 3        # last 3 complete days
+```
+
+A window that starts too late mutes real morning draw; one that ends too late
+alerts every evening after the sun is gone, when there is nothing to act on.
 
 **Solar-based** — mute while the sun is effectively down, which self-adjusts
 across seasons instead of needing the clock edited twice a year:
@@ -169,7 +180,7 @@ list with comments. The ones that matter most:
 | `GRID_DRAW_THRESHOLD_WATTS` | `100` | Alert above this many watts drawn |
 | `POLL_INTERVAL` | `10` | Seconds between reads (use 120+ for SEMS) |
 | `DEBOUNCE_TIME` | `300` | Quiet period after an alert |
-| `ACTIVE_HOURS` | blank | Only alert in this window, e.g. `06:00-20:00` |
+| `ACTIVE_HOURS` | blank | Only alert in this window, e.g. `05:00-19:15` |
 | `ACTIVE_DAYS` | blank | Only alert on these days, e.g. `mon-fri` |
 | `MIN_PV_WATTS` | `0` | Mute while solar is below this |
 | `NOTIFY_MACOS` | on (macOS) | Native notification |
