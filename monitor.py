@@ -9,6 +9,7 @@ POSTs to WEBHOOK_URL, then sleeps DEBOUNCE_TIME before it can fire again.
     python monitor.py --watch    live terminal dashboard
     python monitor.py            one log line per poll
     python monitor.py --once     single reading, then exit
+    python monitor.py --snooze 2h   mute alerts for a while
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,14 @@ class Config:
         # Alerting
         self.notify_macos = _env_bool("NOTIFY_MACOS", sys.platform == "darwin")
         self.notify_sound = _env_str("NOTIFY_SOUND", "Ping")
+
+        # Quiet periods
+        self.active_hours = _env_str("ACTIVE_HOURS")
+        self.active_days = _env_str("ACTIVE_DAYS")
+        self.min_pv_watts = _env_num("MIN_PV_WATTS", 0.0)
+        self.snooze_file = _env_str(
+            "SNOOZE_FILE", str(Path(__file__).resolve().parent / ".snooze")
+        )
 
         self.sensor = _env_str("GRID_POWER_SENSOR")
         self.invert_sign = _env_bool("INVERT_GRID_SIGN", True)
@@ -412,6 +421,163 @@ def build_source(config: Config) -> LocalSource | SemsSource:
 # Webhook
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Quiet periods
+# --------------------------------------------------------------------------
+# Grid draw overnight is normal and unavoidable -- there is no sun to use
+# instead -- so alerting on it is pure noise. These let alerts be limited to
+# the hours when the reading is actionable, without stopping the polling or
+# the dashboard.
+
+WEEKDAYS = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd])", re.IGNORECASE)
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(text: str) -> float | None:
+    """'2h', '30m', '1h30m', '90' (bare = minutes) -> seconds."""
+    text = (text or "").strip().lower()
+    if not text:
+        return None
+    if text.replace(".", "", 1).isdigit():
+        return float(text) * 60.0
+    total = 0.0
+    matched = False
+    for value, unit in DURATION_RE.findall(text):
+        total += float(value) * _UNIT_SECONDS[unit.lower()]
+        matched = True
+    return total if matched else None
+
+
+def parse_active_hours(spec: str) -> tuple[dtime, dtime] | None:
+    """'06:00-20:00' -> (06:00, 20:00). Blank or unparsable -> None."""
+    spec = (spec or "").strip()
+    if not spec:
+        return None
+    match = re.match(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$", spec)
+    if not match:
+        log.warning("ACTIVE_HOURS=%r is not HH:MM-HH:MM; ignoring it.", spec)
+        return None
+    sh, sm, eh, em = (int(g) for g in match.groups())
+    if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+        log.warning("ACTIVE_HOURS=%r has an out-of-range time; ignoring it.", spec)
+        return None
+    return dtime(sh, sm), dtime(eh, em)
+
+
+def parse_active_days(spec: str) -> set[int] | None:
+    """'mon-fri' or 'mon,wed,sat' -> weekday numbers. Blank -> None."""
+    spec = (spec or "").strip().lower()
+    if not spec:
+        return None
+    days: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, _, end = part.partition("-")
+            start, end = start.strip()[:3], end.strip()[:3]
+            if start in WEEKDAYS and end in WEEKDAYS:
+                a, b = WEEKDAYS[start], WEEKDAYS[end]
+                # Ranges may wrap, e.g. sat-sun or fri-mon.
+                days.update(
+                    (a + offset) % 7 for offset in range((b - a) % 7 + 1)
+                )
+                continue
+        if part[:3] in WEEKDAYS:
+            days.add(WEEKDAYS[part[:3]])
+        else:
+            log.warning("ACTIVE_DAYS: could not understand %r; ignoring it.", part)
+    return days or None
+
+
+def in_active_hours(window: tuple[dtime, dtime] | None, now: datetime) -> bool:
+    if window is None:
+        return True
+    start, end = window
+    if start == end:
+        return True
+    current = now.time()
+    if start < end:
+        return start <= current < end
+    # Wraps past midnight, e.g. 22:00-06:00.
+    return current >= start or current < end
+
+
+def snooze_remaining(config: Config, now: float | None = None) -> float:
+    """Seconds of manual snooze left, 0 if not snoozed.
+
+    Backed by a file so the CLI can snooze an already-running agent.
+    """
+    now = time.time() if now is None else now
+    try:
+        raw = Path(config.snooze_file).read_text().strip()
+    except (OSError, ValueError):
+        return 0.0
+    try:
+        until = float(raw)
+    except ValueError:
+        return 0.0
+    return max(0.0, until - now)
+
+
+def set_snooze(config: Config, seconds: float) -> float:
+    """Snooze alerts for `seconds`. Returns the epoch it expires at."""
+    until = time.time() + seconds
+    path = Path(config.snooze_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(until))
+    return until
+
+
+def clear_snooze(config: Config) -> None:
+    Path(config.snooze_file).unlink(missing_ok=True)
+
+
+def suppression_reason(
+    config: Config,
+    stats: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Why alerts are muted right now, or "" if they are live."""
+    now = now or datetime.now()
+
+    remaining = snooze_remaining(config, now.timestamp())
+    if remaining > 0:
+        return f"snoozed for another {_humanise(remaining)}"
+
+    days = parse_active_days(config.active_days)
+    if days is not None and now.weekday() not in days:
+        return f"outside ACTIVE_DAYS ({config.active_days})"
+
+    if not in_active_hours(parse_active_hours(config.active_hours), now):
+        return f"outside ACTIVE_HOURS ({config.active_hours})"
+
+    if config.min_pv_watts > 0 and stats:
+        pv = stats.get("pv")
+        if isinstance(pv, (int, float)) and pv < config.min_pv_watts:
+            return (
+                f"solar {pv:,.0f} W is below MIN_PV_WATTS "
+                f"({config.min_pv_watts:,.0f} W)"
+            )
+
+    return ""
+
+
+def _humanise(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    hours, minutes = divmod(seconds // 60, 60)
+    return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+
+
 def _applescript_str(text: str) -> str:
     """Escape a Python string for embedding in an AppleScript literal."""
     return text.replace("\\", "\\\\").replace('"', '\\"')
@@ -552,6 +718,7 @@ class Screen:
         self.last_read: float | None = None
         self.next_poll: float | None = None
         self.note = ""
+        self.muted = ""
 
     # -- helpers ----------------------------------------------------------
 
@@ -630,7 +797,12 @@ class Screen:
         lines.append(self._c(rule, "2;37"))
         state = self.status
         if self.watts is not None and self.watts > self.config.threshold:
-            state = self._c("OVER THRESHOLD", "31;1")
+            state = self._c(
+                "OVER (muted)" if self.muted else "OVER THRESHOLD",
+                "33" if self.muted else "31;1",
+            )
+        elif self.muted:
+            state = self._c("ok · muted", "36")
         elif self.status == "ok":
             state = self._c("ok", "32")
         countdown = ""
@@ -702,8 +874,10 @@ async def monitor(
                 continue
 
             failures = 0
+            muted = suppression_reason(config, source.stats)
             if screen:
                 screen.update(watts, source)
+                screen.muted = muted
                 screen.line()
                 screen.draw()
             else:
@@ -724,6 +898,14 @@ async def monitor(
                 )
 
             if watts > config.threshold:
+                if muted:
+                    # Poll and log as usual, just do not alert -- and do not
+                    # burn the debounce, so the first actionable reading after
+                    # the quiet period alerts immediately.
+                    log.info("Over threshold but %s; not alerting.", muted)
+                    await _wait(stop, config.poll_interval, screen)
+                    continue
+
                 await fire_alert(
                     config, watts, source.name, source.detail, source.stats
                 )
@@ -809,6 +991,18 @@ async def main() -> int:
     parser.add_argument(
         "--once", action="store_true", help="take one reading, print it, exit",
     )
+    parser.add_argument(
+        "--snooze", metavar="DURATION",
+        help="mute alerts for e.g. 2h, 30m, 1h30m (bare number = minutes), "
+             "then exit. Affects an already-running agent.",
+    )
+    parser.add_argument(
+        "--unsnooze", action="store_true", help="cancel a snooze, then exit",
+    )
+    parser.add_argument(
+        "--status", action="store_true",
+        help="print whether alerts are currently muted, then exit",
+    )
     args = parser.parse_args()
 
     config = Config()
@@ -834,6 +1028,35 @@ async def main() -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
     )
+
+    if args.snooze:
+        seconds = parse_duration(args.snooze)
+        if seconds is None or seconds <= 0:
+            print(f"Could not read a duration from {args.snooze!r}. "
+                  f"Try 2h, 30m, 1h30m, or a bare number of minutes.")
+            return 1
+        until = set_snooze(config, seconds)
+        print(f"Alerts muted for {_humanise(seconds)}, until "
+              f"{datetime.fromtimestamp(until):%H:%M on %a %d %b}.")
+        return 0
+
+    if args.unsnooze:
+        clear_snooze(config)
+        muted = suppression_reason(config)
+        print("Snooze cleared." + (f" Still muted: {muted}." if muted else
+                                   " Alerts are live."))
+        return 0
+
+    if args.status:
+        muted = suppression_reason(config)
+        print(f"Alerts: {'MUTED — ' + muted if muted else 'live'}")
+        window = parse_active_hours(config.active_hours)
+        if window:
+            print(f"Active hours: {config.active_hours}"
+                  f"{' on ' + config.active_days if config.active_days else ''}")
+        if config.min_pv_watts > 0:
+            print(f"Also muted when solar < {config.min_pv_watts:,.0f} W")
+        return 0
 
     if args.once:
         return await _read_once(config)

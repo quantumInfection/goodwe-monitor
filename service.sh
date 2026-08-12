@@ -1,11 +1,13 @@
 #!/bin/bash
 # Manage the GoodWe monitor as a macOS login agent.
 #
-#   ./service.sh install     start at login, and start it now
-#   ./service.sh uninstall   stop and remove
-#   ./service.sh status      is it running?
-#   ./service.sh logs        follow the log
-#   ./service.sh restart     reload after editing .env or the code
+#   ./service.sh install       start at login, and start it now
+#   ./service.sh uninstall     stop and remove
+#   ./service.sh status        is it running? are alerts muted?
+#   ./service.sh logs          follow the log
+#   ./service.sh restart       reload after editing .env or the code
+#   ./service.sh snooze 2h     mute alerts for a while (no restart needed)
+#   ./service.sh unsnooze      cancel a snooze
 
 set -euo pipefail
 
@@ -15,7 +17,11 @@ PLIST_SRC="$PROJECT/$LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
-usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# The snooze is a state file the running agent re-reads each poll, so these
+# take effect immediately without a restart.
+PY() { "$PROJECT/venv/bin/python" "$PROJECT/monitor.py" "$@"; }
 
 install_agent() {
     [ -f "$PROJECT/.env" ] || { echo "No .env in $PROJECT"; exit 1; }
@@ -51,6 +57,7 @@ status_agent() {
         else
             echo "loaded but not running (last exit code: ${last:-unknown})"
         fi
+        PY --status || true
         if [ -f "$PROJECT/logs/monitor.log" ]; then
             echo "--- last 5 log lines ---"
             tail -5 "$PROJECT/logs/monitor.log"
@@ -67,5 +74,7 @@ case "${1:-}" in
     restart)   launchctl kickstart -k "$DOMAIN/$LABEL" && echo "Restarted." ;;
     status)    status_agent ;;
     logs)      tail -f "$PROJECT/logs/monitor.log" ;;
+    snooze)    PY --snooze "${2:?usage: ./service.sh snooze 2h}" ;;
+    unsnooze)  PY --unsnooze ;;
     *)         usage; exit 1 ;;
 esac

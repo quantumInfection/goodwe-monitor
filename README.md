@@ -120,6 +120,44 @@ Set `WEBHOOK_URL` to also POST JSON:
 Debounce applies to every channel, so a sustained overdraw alerts once per
 `DEBOUNCE_TIME` rather than every poll.
 
+## Quiet hours and snoozing
+
+Solar only produces for part of the day. Overnight your house draws from the
+grid no matter what, so alerting on it is noise you cannot act on. Three ways
+to mute, all of which keep polling and keep the dashboard live — they only
+suppress the alert:
+
+**Scheduled window** — in `.env`:
+
+```ini
+ACTIVE_HOURS=06:00-20:00   # blank = always; may wrap midnight, e.g. 22:00-06:00
+ACTIVE_DAYS=mon-fri        # blank = every day; also mon,wed,sat
+```
+
+**Solar-based** — mute while the sun is effectively down, which self-adjusts
+across seasons instead of needing the clock edited twice a year:
+
+```ini
+MIN_PV_WATTS=200           # mute while solar output is below this; 0 disables
+```
+
+**Ad-hoc snooze** — takes effect immediately, no restart needed, and works on
+an already-running login agent:
+
+```bash
+./service.sh snooze 2h     # also 30m, 1h30m, or a bare number of minutes
+./service.sh unsnooze
+./service.sh status        # shows whether alerts are muted, and why
+```
+
+A snooze outranks the scheduled window. Muted periods do **not** consume the
+debounce, so the first actionable reading after a quiet period alerts straight
+away rather than waiting out a timer.
+
+`ACTIVE_HOURS` and `MIN_PV_WATTS` are read at startup — run
+`./service.sh restart` after editing them. Snoozing is a state file, so it
+applies instantly.
+
 ## Configuration
 
 All settings live in `.env`; see [`.env.example`](.env.example) for the full
@@ -131,6 +169,9 @@ list with comments. The ones that matter most:
 | `GRID_DRAW_THRESHOLD_WATTS` | `100` | Alert above this many watts drawn |
 | `POLL_INTERVAL` | `10` | Seconds between reads (use 120+ for SEMS) |
 | `DEBOUNCE_TIME` | `300` | Quiet period after an alert |
+| `ACTIVE_HOURS` | blank | Only alert in this window, e.g. `06:00-20:00` |
+| `ACTIVE_DAYS` | blank | Only alert on these days, e.g. `mon-fri` |
+| `MIN_PV_WATTS` | `0` | Mute while solar is below this |
 | `NOTIFY_MACOS` | on (macOS) | Native notification |
 | `WEBHOOK_URL` | blank | Optional POST target |
 
@@ -194,6 +235,11 @@ battery.
   only discovery is affected.
 - Re-authenticate only on the auth codes. Retrying `"ver is not fund"` just
   doubles your request rate.
+- **SEMS sessions are single-use per account.** Two instances polling the same
+  login invalidate each other's token and re-authenticate on *every* poll —
+  measured at 1 login per 3 polls with one instance, versus 4 with two. Do not
+  leave `--watch` running in a terminal while the login agent is also running;
+  use `./service.sh logs` to watch the agent instead.
 
 ### Local access may not work
 
