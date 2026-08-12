@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.goodwe-monitor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT__/venv/bin/python</string>
+        <string>__PROJECT__/monitor.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT__</string>
+
+    <!-- Start at login and keep it running. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart on crash, but not after a clean exit: a config error
+             exits 1 deliberately and should not become a restart loop. -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Wait 30s between restarts so a persistent failure cannot spin. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- The app logs to LOG_FILE itself, with rotation. These catch anything
+         that escapes logging, e.g. an interpreter-level traceback. -->
+    <key>StandardOutPath</key>
+    <string>__PROJECT__/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT__/logs/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LOG_FILE</key>
+        <string>__PROJECT__/logs/monitor.log</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+
+# Virtualenv
+venv/
+.venv/
+
+# Runtime output
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
