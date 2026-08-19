@@ -30,9 +30,21 @@ install_agent() {
     # Bake the real project path into the plist; launchd does no expansion.
     sed "s|__PROJECT__|$PROJECT|g" "$PLIST_SRC" > "$PLIST_DST"
 
-    # bootout first so re-installing picks up changes.
+    # bootout first so re-installing picks up changes. bootout returns before
+    # launchd has finished tearing the job down, and bootstrapping into a
+    # half-removed service fails with "Input/output error", so wait for the
+    # label to actually disappear.
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "$DOMAIN" "$PLIST_DST"
+    for _ in $(seq 1 30); do
+        launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+
+    if ! launchctl bootstrap "$DOMAIN" "$PLIST_DST"; then
+        echo "bootstrap failed; retrying once after a pause..." >&2
+        sleep 3
+        launchctl bootstrap "$DOMAIN" "$PLIST_DST"
+    fi
     launchctl enable "$DOMAIN/$LABEL"
 
     echo "Installed. Starts automatically at login."

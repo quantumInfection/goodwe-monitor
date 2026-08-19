@@ -6,8 +6,14 @@
     <key>Label</key>
     <string>io.github.goodwe-monitor</string>
 
+    <!-- caffeinate -s holds a "do not sleep" assertion for as long as the
+         monitor runs, so a sleeping Mac cannot silently stop polling. The -s
+         flag applies ONLY on AC power, so battery life is unaffected. Drop
+         the first two arguments to let the machine sleep normally again. -->
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
         <string>__PROJECT__/venv/bin/python</string>
         <string>__PROJECT__/monitor.py</string>
     </array>

@@ -80,6 +80,54 @@ poll so logs stay readable.
 Installs a launchd agent at `~/Library/LaunchAgents/`. Background runs log to
 `logs/monitor.log`, rotated at 1 MB with 3 backups.
 
+### A sleeping Mac does not monitor anything
+
+This is the failure mode most likely to catch you out, because it looks
+identical to "working fine, nothing to report": **no alerts, no errors, and a
+process that still says `RUNNING`.**
+
+A login agent only runs while the machine is awake. On a laptop that sleeps
+whenever the lid closes, coverage collapses. Measured over one week on the
+development machine, against an expected 720 polls/day at a 120s interval:
+
+```
+2026-08-13   157/720   21.8%
+2026-08-15     8/720    1.1%
+2026-08-17   435/720   60.4%
+2026-08-19     3/720    0.4%
+```
+
+Three readings in a day is not monitoring. Grid draw does not wait for you to
+open your laptop.
+
+The agent therefore runs under `caffeinate -s`, which holds a "do not sleep"
+assertion for exactly as long as the monitor lives. The `-s` flag applies
+**only on AC power**, so battery life is untouched, and the assertion is
+released the moment the service stops.
+
+Confirm it is actually in force:
+
+```bash
+pmset -g assertions | grep -A1 PreventSystemSleep
+# caffeinate asserting on behalf of '.../venv/bin/python' (pid NNN)
+```
+
+Caveats worth knowing:
+
+- **Closing the lid still sleeps the machine.** `-s` prevents *idle* sleep, not
+  clamshell sleep. Leave the lid open, or attach an external display.
+- On battery the assertion does nothing by design, so coverage drops again.
+- To let the Mac sleep normally, remove `/usr/bin/caffeinate` and `-s` from
+  `ProgramArguments` in the plist and re-run `./service.sh install`.
+
+If you want genuine 24/7 coverage, run it on something that is always on. It
+reads the SEMS cloud rather than your LAN, so a Raspberry Pi or a small VPS
+works — point `WEBHOOK_URL` at a push service to get alerts on your phone.
+
+To check the monitor is alive rather than merely installed, look at how fresh
+the log is — `./service.sh status` prints the last few readings with
+timestamps. Stale timestamps are the tell.
+
 `KeepAlive` uses `SuccessfulExit=false`, so a crash restarts but a deliberate
 exit (such as a config error exiting 1) does not become a restart loop;
 `ThrottleInterval` bounds retries to one per 30s. `.env` is loaded by absolute

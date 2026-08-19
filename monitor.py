@@ -111,6 +111,11 @@ class Config:
         # Alerting
         self.notify_macos = _env_bool("NOTIFY_MACOS", sys.platform == "darwin")
         self.notify_sound = _env_str("NOTIFY_SOUND", "Ping")
+        # osascript by default: it is built in and works with no install or
+        # authorisation step. terminal-notifier groups banners more neatly but
+        # must be granted notification permission first, and until it is, its
+        # notifications are silently discarded.
+        self.notifier = _env_str("NOTIFIER", "osascript").lower()
 
         # Quiet periods
         self.active_hours = _env_str("ACTIVE_HOURS")
@@ -583,14 +588,24 @@ def _applescript_str(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _notify_macos(title: str, subtitle: str, message: str, sound: str) -> str:
+def _notify_macos(
+    title: str, subtitle: str, message: str, sound: str, notifier: str = "osascript"
+) -> str:
     """Show a macOS notification. Returns "" on success, else an error string.
 
-    Prefers terminal-notifier when installed, because -group replaces the
-    previous alert instead of stacking a new banner every debounce period.
-    Falls back to osascript, which is always present on macOS.
+    `notifier` selects the backend:
+      osascript          built in, needs no setup -- the default
+      terminal-notifier  nicer grouping via -group, but macOS silently drops
+                         its notifications until it has been authorised
+      auto               terminal-notifier when installed, else osascript
+
+    Beware: both backends exit 0 whether or not a banner is actually shown, so
+    a clean exit is not evidence the user saw anything.
     """
-    if shutil.which("terminal-notifier"):
+    use_tn = notifier == "terminal-notifier" or (
+        notifier == "auto" and shutil.which("terminal-notifier")
+    )
+    if use_tn and shutil.which("terminal-notifier"):
         cmd = [
             "terminal-notifier",
             "-title", title,
@@ -652,6 +667,7 @@ async def fire_alert(
             f"Over the {config.threshold:,.0f} W threshold",
             context or f"via {source}",
             config.notify_sound,
+            config.notifier,
         )
         if error:
             ok = False
