@@ -144,13 +144,36 @@ Over the 100 W threshold
 Solar 210 W  Load 1,660 W
 ```
 
-Uses `osascript`, which ships with macOS — no extra dependency. If
-`terminal-notifier` is installed it is preferred, because its `-group` flag
-replaces the previous banner instead of stacking a new one per alert.
+Uses `osascript`, which ships with macOS and needs no install or permission
+step. Selectable with `NOTIFIER`:
 
-If notifications never appear, grant permission to the process that posts them:
-**System Settings → Notifications**, then allow **Script Editor** (osascript) or
-**terminal-notifier**.
+| `NOTIFIER` | Behaviour |
+| --- | --- |
+| `osascript` | **Default.** Built in, works out of the box. |
+| `terminal-notifier` | Groups banners via `-group` instead of stacking one per alert — but see the warning below. |
+| `auto` | `terminal-notifier` when installed, else `osascript`. |
+
+> **`terminal-notifier` fails silently until you authorise it.** macOS discards
+> its notifications entirely if it has not been granted permission, and it does
+> not appear under System Settings → Notifications until it has registered
+> there. It still exits 0, so the log reports success and nothing is shown.
+>
+> This was not theoretical: installing it and preferring it automatically
+> replaced a working `osascript` setup with one that delivered nothing for a
+> week, while logging `Notification shown` at every alert. Hence the default,
+> and hence `auto` is not it.
+
+**Neither backend can tell you whether a banner was actually seen.** Both exit 0
+regardless. If you are debugging silence, test the backends against each other
+rather than trusting exit codes:
+
+```bash
+python -c "import monitor; monitor._notify_macos('A','osascript','see me?','Glass','osascript')"
+python -c "import monitor; monitor._notify_macos('B','terminal-notifier','see me?','Glass','terminal-notifier')"
+```
+
+If neither appears, grant permission under **System Settings → Notifications**
+(Script Editor for `osascript`), and check Focus/Do Not Disturb is off.
 
 Set `WEBHOOK_URL` to also POST JSON:
 
